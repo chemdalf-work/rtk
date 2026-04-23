@@ -8,6 +8,58 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::process::Stdio;
 
+/// A single output line — either a match or a context line.
+#[derive(Debug)]
+struct OutputLine {
+    line_num: usize,
+    content: String,
+    is_context: bool,
+}
+
+/// Try to parse an rg context line.
+/// rg uses `-` as separator for context lines (vs `:` for match lines).
+/// Two formats:
+///   - Multi-file: `path-N-content`   (e.g. `src/main.rs-15-    let x = 1;`)
+///   - Single-file: `N-content`        (e.g. `15-    let x = 1;`)
+/// Returns (file_hint, linenum, content); file_hint is empty string for single-file format.
+fn parse_context_line(line: &str) -> Option<(String, usize, String)> {
+    // Short format: line starts with digits followed by `-` (single-file rg output)
+    let bytes = line.as_bytes();
+    if bytes.first().map(|b| b.is_ascii_digit()).unwrap_or(false) {
+        let mut k = 0;
+        while k < bytes.len() && bytes[k].is_ascii_digit() {
+            k += 1;
+        }
+        if k < bytes.len() && bytes[k] == b'-' {
+            if let Ok(ln) = line[..k].parse::<usize>() {
+                return Some((String::new(), ln, line[k + 1..].to_string()));
+            }
+        }
+    }
+
+    // Full format: scan for first `-N-` where N is a non-empty digit run.
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'-' {
+            let j = i + 1;
+            let mut k = j;
+            while k < bytes.len() && bytes[k].is_ascii_digit() {
+                k += 1;
+            }
+            if k > j && k < bytes.len() && bytes[k] == b'-' {
+                let ln: usize = line[j..k].parse().ok()?;
+                let file = line[..i].to_string();
+                let content = line[k + 1..].to_string();
+                if !file.is_empty() {
+                    return Some((file, ln, content));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     pattern: &str,
@@ -17,6 +69,7 @@ pub fn run(
     context_only: bool,
     file_type: Option<&str>,
     extra_args: &[String],
+    has_context: bool,
     verbose: u8,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -79,7 +132,7 @@ pub fn run(
         return Ok(exit_code);
     }
 
-    let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+    let mut by_file: HashMap<String, Vec<OutputLine>> = HashMap::new();
     let mut total = 0;
 
     // Compile context regex once (instead of per-line in clean_line)
@@ -90,49 +143,98 @@ pub fn run(
     };
 
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
-
-        let (file, line_num, content) = if parts.len() == 3 {
-            let ln = parts[1].parse().unwrap_or(0);
-            (parts[0].to_string(), ln, parts[2])
-        } else if parts.len() == 2 {
-            let ln = parts[0].parse().unwrap_or(0);
-            (path.to_string(), ln, parts[1])
-        } else {
+        // Skip rg group separators (--) emitted between context groups
+        if line == "--" {
             continue;
-        };
+        }
 
-        total += 1;
-        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
-        by_file.entry(file).or_default().push((line_num, cleaned));
+        // Try match line format first: path:linenum:content
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        if parts.len() == 3 {
+            if let Ok(ln) = parts[1].parse::<usize>() {
+                let cleaned =
+                    clean_line(parts[2], max_line_len, context_re.as_ref(), pattern);
+                by_file
+                    .entry(parts[0].to_string())
+                    .or_default()
+                    .push(OutputLine {
+                        line_num: ln,
+                        content: cleaned,
+                        is_context: false,
+                    });
+                total += 1;
+                continue;
+            }
+        }
+        if parts.len() == 2 {
+            if let Ok(ln) = parts[0].parse::<usize>() {
+                let cleaned =
+                    clean_line(parts[1], max_line_len, context_re.as_ref(), pattern);
+                by_file
+                    .entry(path.to_string())
+                    .or_default()
+                    .push(OutputLine {
+                        line_num: ln,
+                        content: cleaned,
+                        is_context: false,
+                    });
+                total += 1;
+                continue;
+            }
+        }
+
+        // Try context line format (only when context flags were passed)
+        if has_context {
+            if let Some((file_hint, ln, content)) = parse_context_line(line) {
+                let file_key = if file_hint.is_empty() {
+                    path.to_string() // single-file search: attribute to search path
+                } else {
+                    file_hint
+                };
+                let cleaned =
+                    clean_line(&content, max_line_len, context_re.as_ref(), pattern);
+                by_file.entry(file_key).or_default().push(OutputLine {
+                    line_num: ln,
+                    content: cleaned,
+                    is_context: true,
+                });
+                continue;
+            }
+        }
     }
 
+    let match_count = by_file.values().flat_map(|v| v.iter()).filter(|l| !l.is_context).count();
+
     let mut rtk_output = String::new();
-    rtk_output.push_str(&format!("{} matches in {}F:\n\n", total, by_file.len()));
+    rtk_output.push_str(&format!("{} matches in {}F:\n\n", match_count, by_file.len()));
 
     let mut shown = 0;
     let mut files: Vec<_> = by_file.iter().collect();
     files.sort_by_key(|(f, _)| *f);
 
-    for (file, matches) in files {
+    for (file, lines) in files {
         if shown >= max_results {
             break;
         }
 
+        let match_count_file = lines.iter().filter(|l| !l.is_context).count();
         let file_display = compact_path(file);
-        rtk_output.push_str(&format!("[file] {} ({}):\n", file_display, matches.len()));
+        rtk_output.push_str(&format!("[file] {} ({}):\n", file_display, match_count_file));
 
         let per_file = config::limits().grep_max_per_file;
-        for (line_num, content) in matches.iter().take(per_file) {
-            rtk_output.push_str(&format!("  {:>4}: {}\n", line_num, content));
-            shown += 1;
-            if shown >= max_results {
+        let mut shown_file = 0;
+        for ol in lines.iter() {
+            if shown_file >= per_file || shown >= max_results {
                 break;
             }
+            let prefix = if ol.is_context { "  ctx " } else { "  " };
+            rtk_output.push_str(&format!("{}{:>4}: {}\n", prefix, ol.line_num, ol.content));
+            shown += 1;
+            shown_file += 1;
         }
 
-        if matches.len() > per_file {
-            rtk_output.push_str(&format!("  +{}\n", matches.len() - per_file));
+        if lines.len() > per_file {
+            rtk_output.push_str(&format!("  +{}\n", lines.len() - per_file));
         }
         rtk_output.push('\n');
     }
@@ -277,6 +379,61 @@ mod tests {
             .collect();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0], "-i");
+    }
+
+    // Fix: parse_context_line handles rg context line format (path-linenum-content)
+    #[test]
+    fn test_parse_context_line_basic() {
+        let line = "src/main.rs-15-    let x = 1;";
+        let result = parse_context_line(line);
+        assert!(result.is_some(), "should parse context line");
+        let (file, ln, content) = result.unwrap();
+        assert_eq!(file, "src/main.rs");
+        assert_eq!(ln, 15);
+        assert_eq!(content, "    let x = 1;");
+    }
+
+    #[test]
+    fn test_parse_context_line_absolute_path() {
+        let line = "/Users/foo/project/src/lib.rs-42-pub fn bar() {";
+        let result = parse_context_line(line);
+        assert!(result.is_some());
+        let (file, ln, content) = result.unwrap();
+        assert_eq!(file, "/Users/foo/project/src/lib.rs");
+        assert_eq!(ln, 42);
+        assert_eq!(content, "pub fn bar() {");
+    }
+
+    #[test]
+    fn test_parse_context_line_short_format() {
+        // Single-file rg output: no filename prefix
+        let line = "48-    pattern: &str,";
+        let result = parse_context_line(line);
+        assert!(result.is_some(), "should parse short-format context line");
+        let (file, ln, content) = result.unwrap();
+        assert_eq!(file, "", "file hint empty for short format");
+        assert_eq!(ln, 48);
+        assert_eq!(content, "    pattern: &str,");
+    }
+
+    #[test]
+    fn test_parse_context_line_ignores_group_separator() {
+        // rg group separator "--" should not be parsed as a context line
+        let line = "--";
+        let result = parse_context_line(line);
+        // "--" has no digit run, so should not match
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_context_line_content_with_colon() {
+        // Context lines whose content contains ':' should still parse
+        let line = "src/foo.rs-10-    key: value,";
+        let result = parse_context_line(line);
+        assert!(result.is_some());
+        let (_, ln, content) = result.unwrap();
+        assert_eq!(ln, 10);
+        assert!(content.contains("key: value"));
     }
 
     // --- truncation accuracy ---

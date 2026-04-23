@@ -294,7 +294,22 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
-        /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
+        /// Lines of context after each match (passed to rg -A)
+        #[arg(short = 'A', long = "after-context", value_name = "N")]
+        after_context: Option<usize>,
+        /// Lines of context before each match (passed to rg -B)
+        #[arg(short = 'B', long = "before-context", value_name = "N")]
+        before_context: Option<usize>,
+        /// Lines of context around each match (passed to rg -C)
+        #[arg(short = 'C', long = "context", value_name = "N")]
+        context_lines: Option<usize>,
+        /// Case-insensitive search (passed to rg -i)
+        #[arg(short = 'i', long = "ignore-case")]
+        ignore_case: bool,
+        /// Match whole words only (passed to rg -w)
+        #[arg(short = 'w', long = "word-regexp")]
+        word_regexp: bool,
+        /// Extra ripgrep arguments (--glob, --type, etc.)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
     },
@@ -1582,17 +1597,45 @@ fn run_cli() -> Result<i32> {
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
+            after_context,
+            before_context,
+            context_lines,
+            ignore_case,
+            word_regexp,
             extra_args,
-        } => grep_cmd::run(
-            &pattern,
-            &path,
-            max_len,
-            max,
-            context_only,
-            file_type.as_deref(),
-            &extra_args,
-            cli.verbose,
-        )?,
+        } => {
+            let mut all_extra: Vec<String> = Vec::new();
+            if let Some(n) = after_context {
+                all_extra.extend(["-A".to_string(), n.to_string()]);
+            }
+            if let Some(n) = before_context {
+                all_extra.extend(["-B".to_string(), n.to_string()]);
+            }
+            if let Some(n) = context_lines {
+                all_extra.extend(["-C".to_string(), n.to_string()]);
+            }
+            if ignore_case {
+                all_extra.push("-i".to_string());
+            }
+            if word_regexp {
+                all_extra.push("-w".to_string());
+            }
+            all_extra.extend(extra_args);
+            let has_context = after_context.is_some()
+                || before_context.is_some()
+                || context_lines.is_some();
+            grep_cmd::run(
+                &pattern,
+                &path,
+                max_len,
+                max,
+                context_only,
+                file_type.as_deref(),
+                &all_extra,
+                has_context,
+                cli.verbose,
+            )?
+        }
 
         Commands::Init {
             global,

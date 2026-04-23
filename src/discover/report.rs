@@ -1,6 +1,7 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
 use crate::hooks::constants::{HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use crate::hooks::hook_check::{self, HookStatus};
 use serde::Serialize;
 
 /// RTK support status for a command.
@@ -91,6 +92,17 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
             0
         }
     ));
+
+    // Warn when hook is installed: session JSONL records pre-hook commands,
+    // so "already using RTK" undercounts and "missed savings" overcounts.
+    // The hook rewrites commands at execution time — use `rtk gain` for true savings.
+    if matches!(hook_check::status(), HookStatus::Ok | HookStatus::Outdated) {
+        out.push_str(
+            "Note: Hook detected — session files record pre-hook commands.\n\
+             \"Missed savings\" below may already be captured by the hook.\n\
+             Use `rtk gain` for actual savings data.\n",
+        );
+    }
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
         out.push_str("\nNo missed savings found. RTK usage looks good!\n");
