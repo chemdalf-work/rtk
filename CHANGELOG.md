@@ -5,6 +5,24 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.0](https://github.com/rtk-ai/rtk/compare/v0.35.0...v0.36.0) (2026-05-12)
+
+### Features
+
+* **postfilter:** CDC cache alignment, terse scoring, L-curve reorder, budget tracking
+* **dedup:** log deduplication engine — collapses repetitive CI/build output (80%+ savings)
+* **grep:** path shortening, 5/file cap, 20-file cap, 120-char truncation, sorted by match count
+* **find:** per-directory cap (10 files), 60-char line wrapping
+* **read:** auto-level detection — code files get Minimal, Data files get DataAuto
+* **read:** lockfile bypass — Cargo.lock, package-lock.json etc → 1-line summary (99%)
+* **read:** JSON schema summarizer — key:type tree (70-90% savings on package.json)
+* **read:** TOML section scanner — [section] headers + key counts
+* **read:** markdown compressor — headers + 3 prose lines, code blocks omitted
+* **read:** YAML top-level key scanner
+* **filter:** import block collapsing (>8 consecutive imports → summary line)
+* **grep:** support -A/-B/-C/-i/-w flags + context line parsing
+* **preload:** new `rtk preload` command for Boltzmann-ranked file discovery
+
 ## [0.35.0](https://github.com/rtk-ai/rtk/compare/v0.34.3...v0.35.0) (2026-04-06)
 
 
