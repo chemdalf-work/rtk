@@ -233,8 +233,39 @@ pub fn compress_markdown(content: &str) -> String {
     result.join("\n")
 }
 
-/// Detect the data sub-type from file extension for dispatch.
+/// Mask values in .env file content, preserving key names.
+pub fn mask_env_values(content: &str) -> String {
+    let mut result = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(eq_pos) = trimmed.find('=') {
+            let key = &trimmed[..eq_pos];
+            result.push(format!("{key}=***"));
+        } else {
+            result.push(trimmed.to_string());
+        }
+    }
+    let total = content.lines().count();
+    let keys = result.len();
+    format!(
+        "[.env: {} keys, values masked]\n{}",
+        keys,
+        result.join("\n")
+    )
+}
+
+/// Detect the data sub-type from file extension and filename for dispatch.
 pub fn data_subtype(path: &Path) -> DataSubtype {
+    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    // .env, .env.local, .env.production, etc
+    if filename == ".env" || filename.starts_with(".env.") || filename.ends_with(".env") {
+        return DataSubtype::Env;
+    }
+
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -244,6 +275,7 @@ pub fn data_subtype(path: &Path) -> DataSubtype {
         "json" | "jsonc" | "json5" => DataSubtype::Json,
         "yaml" | "yml" | "toml" => DataSubtype::Yaml,
         "md" | "markdown" => DataSubtype::Markdown,
+        "env" => DataSubtype::Env,
         _ => DataSubtype::Other,
     }
 }
@@ -253,6 +285,7 @@ pub enum DataSubtype {
     Json,
     Yaml,
     Markdown,
+    Env,
     Other,
 }
 
@@ -360,6 +393,31 @@ mod tests {
             result.contains("3 keys"),
             "deps should have 3 keys: {result}"
         );
+    }
+
+    #[test]
+    fn test_mask_env_values() {
+        let env = "# Database config\nDB_HOST=localhost\nDB_PASSWORD=super_secret_123\nAPI_KEY=sk-1234567890abcdef\n\nDEBUG=true\n";
+        let result = mask_env_values(env);
+        assert!(result.contains("4 keys"), "got: {result}");
+        assert!(result.contains("DB_HOST=***"), "got: {result}");
+        assert!(result.contains("API_KEY=***"), "got: {result}");
+        assert!(
+            !result.contains("super_secret"),
+            "must not leak values: {result}"
+        );
+        assert!(
+            !result.contains("sk-1234"),
+            "must not leak values: {result}"
+        );
+    }
+
+    #[test]
+    fn test_data_subtype_env_detection() {
+        assert_eq!(data_subtype(Path::new(".env")), DataSubtype::Env);
+        assert_eq!(data_subtype(Path::new(".env.local")), DataSubtype::Env);
+        assert_eq!(data_subtype(Path::new(".env.production")), DataSubtype::Env);
+        assert_eq!(data_subtype(Path::new("app.env")), DataSubtype::Env);
     }
 
     #[test]

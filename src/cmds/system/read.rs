@@ -64,6 +64,7 @@ pub fn run(
             }
             filter_data::DataSubtype::Yaml => filter_data::scan_yaml_keys(&content),
             filter_data::DataSubtype::Markdown => filter_data::compress_markdown(&content),
+            filter_data::DataSubtype::Env => filter_data::mask_env_values(&content),
             filter_data::DataSubtype::Other => {
                 let filter = filter::get_filter(FilterLevel::Minimal);
                 filter.filter(&content, &lang)
