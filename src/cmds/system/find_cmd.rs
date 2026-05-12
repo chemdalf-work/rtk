@@ -310,7 +310,7 @@ pub fn run(
     println!("{}F {}D:", total_files, dirs_count);
     println!();
 
-    // Display with proper --max limiting (count individual files)
+    let per_dir_cap: usize = 10;
     let mut shown = 0;
     for dir in &dirs {
         if shown >= max_results {
@@ -324,21 +324,31 @@ pub fn run(
             dir.clone()
         };
 
-        let remaining_budget = max_results - shown;
-        if files_in_dir.len() <= remaining_budget {
-            println!("{}/ {}", dir_display, files_in_dir.join(" "));
-            shown += files_in_dir.len();
-        } else {
-            // Partial display: show only what fits in budget
-            let partial: Vec<_> = files_in_dir
-                .iter()
-                .take(remaining_budget)
-                .cloned()
-                .collect();
-            println!("{}/ {}", dir_display, partial.join(" "));
-            shown += partial.len();
-            break;
+        println!("{}/", dir_display);
+
+        let remaining_budget = (max_results - shown).min(per_dir_cap);
+        let show: Vec<_> = files_in_dir.iter().take(remaining_budget).collect();
+
+        let mut line_buf = String::new();
+        for f in &show {
+            if line_buf.len() + f.len() + 1 > 60 {
+                println!("  {}", line_buf);
+                line_buf.clear();
+            }
+            if !line_buf.is_empty() {
+                line_buf.push(' ');
+            }
+            line_buf.push_str(f);
         }
+        if !line_buf.is_empty() {
+            println!("  {}", line_buf);
+        }
+
+        if files_in_dir.len() > remaining_budget {
+            println!("  ... +{} more", files_in_dir.len() - remaining_budget);
+        }
+
+        shown += show.len();
     }
 
     if shown < total_files {

@@ -216,6 +216,13 @@ enum Commands {
         path: PathBuf,
     },
 
+    /// Preload relevant files for a task (Boltzmann-ranked by relevance)
+    Preload {
+        /// Task description (e.g. "fix auth bug in login")
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        task: Vec<String>,
+    },
+
     /// Show environment variables (filtered, sensitive masked)
     Env {
         /// Filter by name (e.g. PATH, AWS)
@@ -280,7 +287,7 @@ enum Commands {
         #[arg(default_value = ".")]
         path: String,
         /// Max line length
-        #[arg(short = 'l', long, default_value = "80")]
+        #[arg(short = 'l', long, default_value = "120")]
         max_len: usize,
         /// Max results to show
         #[arg(short, long, default_value = "200")]
@@ -1126,7 +1133,11 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 };
 
                 let filtered = core::toml_filter::apply_filter(filter, &stdout_raw);
-                println!("{}", filtered);
+                let pf_config = core::config::postfilter();
+                let cmd_key = core::chunk_cache::cache_key(&raw_command);
+                let final_output =
+                    core::postfilter::postprocess_filtered(&filtered, &cmd_key, &pf_config);
+                println!("{}", final_output);
                 if let Some(hint) = tee_hint {
                     println!("{}", hint);
                 }
@@ -1135,7 +1146,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                     &raw_command,
                     &format!("rtk:toml {}", raw_command),
                     &stdout_raw,
-                    &filtered,
+                    &final_output,
                 );
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
 
@@ -1149,27 +1160,82 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             }
         }
     } else {
-        // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
-        let status = core::utils::resolved_command(&args[0])
-            .args(&args[1..])
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status();
+        // No TOML match: try terse compression if postfilter is enabled
+        let pf_config = core::config::postfilter();
 
-        match status {
-            Ok(s) => {
-                timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+        if pf_config.terse_enabled {
+            // Capture stdout for potential terse compression
+            let result = core::utils::resolved_command(&args[0])
+                .args(&args[1..])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::inherit())
+                .output();
 
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+            match result {
+                Ok(output) => {
+                    let exit_code = core::utils::exit_code_from_output(&output, &raw_command);
+                    let stdout_raw = String::from_utf8_lossy(&output.stdout);
+                    let cmd_key = core::chunk_cache::cache_key(&raw_command);
 
-                Ok(core::utils::exit_code_from_status(&s, &raw_command))
+                    match core::postfilter::postprocess_fallback(&stdout_raw, &cmd_key, &pf_config)
+                    {
+                        Some(compressed) => {
+                            println!("{}", compressed);
+                            timer.track(
+                                &raw_command,
+                                &format!("rtk:terse {}", raw_command),
+                                &stdout_raw,
+                                &compressed,
+                            );
+                        }
+                        None => {
+                            print!("{}", stdout_raw);
+                            timer.track_passthrough(
+                                &raw_command,
+                                &format!("rtk fallback: {}", raw_command),
+                            );
+                        }
+                    }
+
+                    core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                    Ok(exit_code)
+                }
+                Err(e) => {
+                    core::tracking::record_parse_failure_silent(
+                        &raw_command,
+                        &error_message,
+                        false,
+                    );
+                    eprintln!("[rtk: {}]", e);
+                    Ok(127)
+                }
             }
-            Err(e) => {
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
-                // Command not found or other OS error — single message, no duplicate Clap error
-                eprintln!("[rtk: {}]", e);
-                Ok(127)
+        } else {
+            // Postfilter disabled: original passthrough behaviour
+            let status = core::utils::resolved_command(&args[0])
+                .args(&args[1..])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status();
+
+            match status {
+                Ok(s) => {
+                    timer
+                        .track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+                    core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                    Ok(core::utils::exit_code_from_status(&s, &raw_command))
+                }
+                Err(e) => {
+                    core::tracking::record_parse_failure_silent(
+                        &raw_command,
+                        &error_message,
+                        false,
+                    );
+                    eprintln!("[rtk: {}]", e);
+                    Ok(127)
+                }
             }
         }
     }
@@ -1486,6 +1552,15 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Preload { task } => {
+            let task_str = task
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            cmds::system::preload::run(&task_str, cli.verbose)?
+        }
+
         Commands::Deps { path } => {
             deps::run(&path, cli.verbose)?;
             0
@@ -1621,9 +1696,8 @@ fn run_cli() -> Result<i32> {
                 all_extra.push("-w".to_string());
             }
             all_extra.extend(extra_args);
-            let has_context = after_context.is_some()
-                || before_context.is_some()
-                || context_lines.is_some();
+            let has_context =
+                after_context.is_some() || before_context.is_some() || context_lines.is_some();
             grep_cmd::run(
                 &pattern,
                 &path,
@@ -2216,6 +2290,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Err { .. }
             | Commands::Test { .. }
             | Commands::Json { .. }
+            | Commands::Preload { .. }
             | Commands::Deps { .. }
             | Commands::Env { .. }
             | Commands::Find { .. }

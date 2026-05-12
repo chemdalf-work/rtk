@@ -21,6 +21,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub postfilter: PostFilterConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -99,12 +101,67 @@ impl Default for TelemetryConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostFilterConfig {
+    /// Enable CDC reordering for prompt-cache alignment.
+    #[serde(default = "default_true")]
+    pub cdc_enabled: bool,
+    /// Enable log deduplication before terse scoring.
+    #[serde(default = "default_true")]
+    pub dedup_enabled: bool,
+    /// Enable terse scoring for unhandled commands.
+    #[serde(default = "default_true")]
+    pub terse_enabled: bool,
+    /// Line score threshold for terse compression (0.0-5.0).
+    #[serde(default = "default_terse_threshold")]
+    pub terse_threshold: f32,
+    /// Enable session budget tracking.
+    #[serde(default = "default_true")]
+    pub budget_enabled: bool,
+    /// Session token budget limit.
+    #[serde(default = "default_budget_tokens")]
+    pub budget_tokens: u64,
+    /// Budget warning threshold (percent).
+    #[serde(default = "default_budget_warn_percent")]
+    pub budget_warn_percent: u8,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_terse_threshold() -> f32 {
+    2.5
+}
+fn default_budget_tokens() -> u64 {
+    500_000
+}
+fn default_budget_warn_percent() -> u8 {
+    80
+}
+
+impl Default for PostFilterConfig {
+    fn default() -> Self {
+        Self {
+            cdc_enabled: true,
+            dedup_enabled: true,
+            terse_enabled: true,
+            terse_threshold: 2.5,
+            budget_enabled: true,
+            budget_tokens: 500_000,
+            budget_warn_percent: 80,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LimitsConfig {
     /// Max total grep results to show (default: 200)
     pub grep_max_results: usize,
-    /// Max matches per file in grep output (default: 25)
+    /// Max matches per file in grep output (default: 5)
     pub grep_max_per_file: usize,
+    /// Max files shown in grep output (default: 20)
+    #[serde(default = "default_grep_max_files")]
+    pub grep_max_files: usize,
     /// Max staged/modified files shown in git status (default: 15)
     pub status_max_files: usize,
     /// Max untracked files shown in git status (default: 10)
@@ -113,11 +170,16 @@ pub struct LimitsConfig {
     pub passthrough_max_chars: usize,
 }
 
+fn default_grep_max_files() -> usize {
+    20
+}
+
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
             grep_max_results: 200,
-            grep_max_per_file: 25,
+            grep_max_per_file: 5,
+            grep_max_files: 20,
             status_max_files: 15,
             status_max_untracked: 10,
             passthrough_max_chars: 2000,
@@ -128,6 +190,11 @@ impl Default for LimitsConfig {
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
+}
+
+/// Get postfilter config. Falls back to defaults if config can't be loaded.
+pub fn postfilter() -> PostFilterConfig {
+    Config::load().map(|c| c.postfilter).unwrap_or_default()
 }
 
 /// Check if telemetry is enabled in config. Returns None if config can't be loaded.

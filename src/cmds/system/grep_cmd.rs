@@ -2,7 +2,7 @@
 
 use crate::core::config;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command};
+use crate::core::utils::{exit_code_from_output, resolved_command, shorten_path};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
@@ -21,6 +21,7 @@ struct OutputLine {
 /// Two formats:
 ///   - Multi-file: `path-N-content`   (e.g. `src/main.rs-15-    let x = 1;`)
 ///   - Single-file: `N-content`        (e.g. `15-    let x = 1;`)
+///
 /// Returns (file_hint, linenum, content); file_hint is empty string for single-file format.
 fn parse_context_line(line: &str) -> Option<(String, usize, String)> {
     // Short format: line starts with digits followed by `-` (single-file rg output)
@@ -205,42 +206,45 @@ pub fn run(
 
     let match_count = by_file.values().flat_map(|v| v.iter()).filter(|l| !l.is_context).count();
 
+    let limits = config::limits();
+    let per_file = limits.grep_max_per_file;
+    let max_files = limits.grep_max_files;
+
     let mut rtk_output = String::new();
-    rtk_output.push_str(&format!("{} matches in {}F:\n\n", match_count, by_file.len()));
+    rtk_output.push_str(&format!("{} matches in {}F:\n", match_count, by_file.len()));
+
+    let mut files: Vec<_> = by_file.iter().collect();
+    files.sort_by_key(|(_, lines)| std::cmp::Reverse(lines.iter().filter(|l| !l.is_context).count()));
 
     let mut shown = 0;
-    let mut files: Vec<_> = by_file.iter().collect();
-    files.sort_by_key(|(f, _)| *f);
 
-    for (file, lines) in files {
-        if shown >= max_results {
+    for (files_shown, (file, lines)) in files.iter().enumerate() {
+        if files_shown >= max_files || shown >= max_results {
             break;
         }
 
         let match_count_file = lines.iter().filter(|l| !l.is_context).count();
-        let file_display = compact_path(file);
-        rtk_output.push_str(&format!("[file] {} ({}):\n", file_display, match_count_file));
+        let file_display = shorten_path(file);
+        rtk_output.push_str(&format!("\n{} ({}):", file_display, match_count_file));
 
-        let per_file = config::limits().grep_max_per_file;
-        let mut shown_file = 0;
-        for ol in lines.iter() {
+        for (shown_file, ol) in lines.iter().enumerate() {
             if shown_file >= per_file || shown >= max_results {
                 break;
             }
             let prefix = if ol.is_context { "  ctx " } else { "  " };
-            rtk_output.push_str(&format!("{}{:>4}: {}\n", prefix, ol.line_num, ol.content));
+            rtk_output.push_str(&format!("\n{}{}: {}", prefix, ol.line_num, ol.content));
             shown += 1;
-            shown_file += 1;
         }
 
         if lines.len() > per_file {
-            rtk_output.push_str(&format!("  +{}\n", lines.len() - per_file));
+            rtk_output.push_str(&format!("\n  ... +{} more", lines.len() - per_file));
         }
-        rtk_output.push('\n');
     }
 
-    if total > shown {
-        rtk_output.push_str(&format!("... +{}\n", total - shown));
+    if files.len() > max_files {
+        rtk_output.push_str(&format!("\n\n... +{} more files", files.len() - max_files));
+    } else if total > shown {
+        rtk_output.push_str(&format!("\n\n... +{} more", total - shown));
     }
 
     print!("{}", rtk_output);
@@ -300,23 +304,6 @@ fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &
     }
 }
 
-fn compact_path(path: &str) -> String {
-    if path.len() <= 50 {
-        return path.to_string();
-    }
-
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() <= 3 {
-        return path.to_string();
-    }
-
-    format!(
-        "{}/.../{}/{}",
-        parts[0],
-        parts[parts.len() - 2],
-        parts[parts.len() - 1]
-    )
-}
 
 #[cfg(test)]
 mod tests {
@@ -331,10 +318,13 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_path() {
-        let path = "/Users/patrick/dev/project/src/components/Button.tsx";
-        let compact = compact_path(path);
-        assert!(compact.len() <= 60);
+    fn test_shorten_path_in_grep() {
+        use crate::core::utils::shorten_path;
+        assert_eq!(shorten_path("src/core/patterns/grep.rs"), "s/c/p/grep.rs");
+        assert_eq!(
+            shorten_path("internal/generator/templates/readme.md.tmpl"),
+            "i/g/t/readme.md.tmpl"
+        );
     }
 
     #[test]
@@ -440,21 +430,17 @@ mod tests {
 
     #[test]
     fn test_grep_overflow_uses_uncapped_total() {
-        // Confirm the grep overflow invariant: matches vec is never capped before overflow calc.
-        // If total_matches > per_file, overflow = total_matches - per_file (not capped).
-        // This documents that grep_cmd.rs avoids the diff_cmd bug (cap at N then compute N-10).
         let per_file = config::limits().grep_max_per_file;
+        assert_eq!(per_file, 5, "default grep_max_per_file should be 5");
         let total_matches = per_file + 42;
         let overflow = total_matches - per_file;
         assert_eq!(overflow, 42, "overflow must equal true suppressed count");
-        // Demonstrate why capping before subtraction is wrong:
-        let hypothetical_cap = per_file + 5;
-        let capped = total_matches.min(hypothetical_cap);
-        let wrong_overflow = capped - per_file;
-        assert_ne!(
-            wrong_overflow, overflow,
-            "capping before subtraction gives wrong overflow"
-        );
+    }
+
+    #[test]
+    fn test_grep_max_files_default() {
+        let limits = config::limits();
+        assert_eq!(limits.grep_max_files, 20, "default grep_max_files should be 20");
     }
 
     // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).

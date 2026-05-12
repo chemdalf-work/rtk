@@ -252,6 +252,29 @@ pub fn ruby_exec(tool: &str) -> Command {
     Command::new(tool)
 }
 
+/// Shorten a file path by abbreviating parent directories to their first character.
+/// Keeps the last component (filename) intact.
+///
+/// # Examples
+/// ```
+/// use rtk::utils::shorten_path;
+/// assert_eq!(shorten_path("src/core/patterns/grep.rs"), "s/c/p/grep.rs");
+/// assert_eq!(shorten_path("main.rs"), "main.rs");
+/// ```
+pub fn shorten_path(path: &str) -> String {
+    let path = path.strip_prefix("./").unwrap_or(path);
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() <= 1 {
+        return path.to_string();
+    }
+    let mut shortened: Vec<String> = parts[..parts.len() - 1]
+        .iter()
+        .map(|p| p.chars().next().map(|c| c.to_string()).unwrap_or_default())
+        .collect();
+    shortened.push(parts[parts.len() - 1].to_string());
+    shortened.join("/")
+}
+
 /// Count whitespace-delimited tokens in text. Used by filter tests to verify
 /// token savings claims.
 #[cfg(test)]
@@ -843,6 +866,34 @@ mod tests {
     #[test]
     fn test_human_bytes_tb() {
         assert_eq!(human_bytes(1_099_511_627_776), "1.0 TB");
+    }
+
+    #[test]
+    fn test_shorten_path_deep() {
+        assert_eq!(shorten_path("src/core/patterns/grep.rs"), "s/c/p/grep.rs");
+    }
+
+    #[test]
+    fn test_shorten_path_no_parent() {
+        assert_eq!(shorten_path("main.rs"), "main.rs");
+    }
+
+    #[test]
+    fn test_shorten_path_one_parent() {
+        assert_eq!(shorten_path("src/main.rs"), "s/main.rs");
+    }
+
+    #[test]
+    fn test_shorten_path_strips_dot_slash() {
+        assert_eq!(shorten_path("./src/core/mod.rs"), "s/c/mod.rs");
+    }
+
+    #[test]
+    fn test_shorten_path_deep_nesting() {
+        assert_eq!(
+            shorten_path("internal/generator/templates/readme.md.tmpl"),
+            "i/g/t/readme.md.tmpl"
+        );
     }
 
     #[test]
