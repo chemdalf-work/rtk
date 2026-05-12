@@ -9,6 +9,7 @@ pub enum FilterLevel {
     None,
     Minimal,
     Aggressive,
+    DataAuto,
 }
 
 impl FromStr for FilterLevel {
@@ -19,6 +20,7 @@ impl FromStr for FilterLevel {
             "none" => Ok(FilterLevel::None),
             "minimal" => Ok(FilterLevel::Minimal),
             "aggressive" => Ok(FilterLevel::Aggressive),
+            "data" | "auto" => Ok(FilterLevel::DataAuto),
             _ => Err(format!("Unknown filter level: {}", s)),
         }
     }
@@ -30,6 +32,7 @@ impl std::fmt::Display for FilterLevel {
             FilterLevel::None => write!(f, "none"),
             FilterLevel::Minimal => write!(f, "minimal"),
             FilterLevel::Aggressive => write!(f, "aggressive"),
+            FilterLevel::DataAuto => write!(f, "data-auto"),
         }
     }
 }
@@ -241,6 +244,19 @@ lazy_static! {
     .unwrap();
 }
 
+const IMPORT_COLLAPSE_THRESHOLD: usize = 8;
+
+fn flush_imports(run: &[&str], result: &mut String) {
+    if run.len() <= IMPORT_COLLAPSE_THRESHOLD {
+        for line in run {
+            result.push_str(line);
+            result.push('\n');
+        }
+    } else {
+        result.push_str(&format!("// [{} imports — collapsed]\n", run.len()));
+    }
+}
+
 impl FilterStrategy for AggressiveFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
         // Data formats (JSON, YAML, etc.) must never be code-filtered
@@ -252,15 +268,21 @@ impl FilterStrategy for AggressiveFilter {
         let mut result = String::with_capacity(minimal.len() / 2);
         let mut brace_depth = 0;
         let mut in_impl_body = false;
+        let mut import_run: Vec<&str> = Vec::new();
 
         for line in minimal.lines() {
             let trimmed = line.trim();
 
-            // Always keep imports
+            // Buffer consecutive imports for collapsing
             if IMPORT_PATTERN.is_match(trimmed) {
-                result.push_str(line);
-                result.push('\n');
+                import_run.push(line);
                 continue;
+            }
+
+            // Flush import buffer when non-import encountered
+            if !import_run.is_empty() {
+                flush_imports(&import_run, &mut result);
+                import_run.clear();
             }
 
             // Always keep function/struct/class signatures
@@ -308,7 +330,20 @@ impl FilterStrategy for AggressiveFilter {
             }
         }
 
+        // Flush any trailing imports
+        if !import_run.is_empty() {
+            flush_imports(&import_run, &mut result);
+        }
+
         result.trim().to_string()
+    }
+}
+
+pub struct DataAutoFilter;
+
+impl FilterStrategy for DataAutoFilter {
+    fn filter(&self, content: &str, _lang: &Language) -> String {
+        MinimalFilter.filter(content, &Language::Data)
     }
 }
 
@@ -317,6 +352,7 @@ pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
         FilterLevel::None => Box::new(NoFilter),
         FilterLevel::Minimal => Box::new(MinimalFilter),
         FilterLevel::Aggressive => Box::new(AggressiveFilter),
+        FilterLevel::DataAuto => Box::new(DataAutoFilter),
     }
 }
 
@@ -463,6 +499,46 @@ mod tests {
         assert!(
             result.contains("/* not a comment */"),
             "Aggressive filter must not strip comment-like patterns in JSON"
+        );
+    }
+
+    #[test]
+    fn test_aggressive_import_collapsing() {
+        let mut code = String::new();
+        for i in 0..12 {
+            code.push_str(&format!("use crate::module_{i}::Thing;\n"));
+        }
+        code.push_str("\nfn main() {\n    println!(\"hello\");\n}\n");
+
+        let filter = AggressiveFilter;
+        let result = filter.filter(&code, &Language::Rust);
+        assert!(
+            result.contains("12 imports"),
+            "should collapse 12 imports: {result}"
+        );
+        assert!(
+            !result.contains("module_5"),
+            "individual imports should not appear: {result}"
+        );
+    }
+
+    #[test]
+    fn test_aggressive_import_no_collapse_small() {
+        let mut code = String::new();
+        for i in 0..4 {
+            code.push_str(&format!("use crate::module_{i}::Thing;\n"));
+        }
+        code.push_str("\nfn main() {}\n");
+
+        let filter = AggressiveFilter;
+        let result = filter.filter(&code, &Language::Rust);
+        assert!(
+            result.contains("module_0"),
+            "small import runs should be preserved: {result}"
+        );
+        assert!(
+            !result.contains("imports"),
+            "should not show collapse message: {result}"
         );
     }
 

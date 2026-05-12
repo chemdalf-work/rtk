@@ -1,6 +1,7 @@
 //! Reads source files with optional language-aware filtering to strip boilerplate.
 
 use crate::core::filter::{self, FilterLevel, Language};
+use crate::core::filter_data;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use std::fs;
@@ -24,6 +25,19 @@ pub fn run(
     let content = fs::read_to_string(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
+    // Lockfile bypass — before any language detection
+    if filter_data::is_lockfile(file) {
+        let summary = filter_data::summarize_lockfile(&content, file);
+        println!("{}", summary);
+        timer.track(
+            &format!("cat {}", file.display()),
+            "rtk read",
+            &content,
+            &summary,
+        );
+        return Ok(());
+    }
+
     // Detect language from extension
     let lang = file
         .extension()
@@ -35,9 +49,30 @@ pub fn run(
         eprintln!("Detected language: {:?}", lang);
     }
 
-    // Apply filter
-    let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    // Auto-upgrade level=None for known file types
+    let effective_level = if level == FilterLevel::None {
+        auto_level_for_lang(&lang)
+    } else {
+        level
+    };
+
+    // Data-format-specific compression
+    let mut filtered = if effective_level == FilterLevel::DataAuto {
+        match filter_data::data_subtype(file) {
+            filter_data::DataSubtype::Json => {
+                filter_data::summarize_json(&content).unwrap_or_else(|| content.clone())
+            }
+            filter_data::DataSubtype::Yaml => filter_data::scan_yaml_keys(&content),
+            filter_data::DataSubtype::Markdown => filter_data::compress_markdown(&content),
+            filter_data::DataSubtype::Other => {
+                let filter = filter::get_filter(FilterLevel::Minimal);
+                filter.filter(&content, &lang)
+            }
+        }
+    } else {
+        let filter = filter::get_filter(effective_level);
+        filter.filter(&content, &lang)
+    };
 
     // Safety: if filter emptied a non-empty file, fall back to raw content
     if filtered.trim().is_empty() && !content.trim().is_empty() {
@@ -174,6 +209,23 @@ fn apply_line_window(
     }
 
     content.to_string()
+}
+
+fn auto_level_for_lang(lang: &Language) -> FilterLevel {
+    match lang {
+        Language::Rust
+        | Language::Python
+        | Language::JavaScript
+        | Language::TypeScript
+        | Language::Go
+        | Language::C
+        | Language::Cpp
+        | Language::Java
+        | Language::Ruby
+        | Language::Shell => FilterLevel::Minimal,
+        Language::Data => FilterLevel::DataAuto,
+        Language::Unknown => FilterLevel::None,
+    }
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ pub mod constants;
 pub mod dedup;
 pub mod display_helpers;
 pub mod filter;
+pub mod filter_data;
 pub mod postfilter;
 pub mod runner;
 pub mod tee;
