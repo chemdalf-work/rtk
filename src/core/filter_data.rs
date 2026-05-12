@@ -127,16 +127,66 @@ fn type_of(val: &serde_json::Value) -> String {
 }
 
 pub fn scan_yaml_keys(content: &str) -> String {
-    let keys: Vec<&str> = content
-        .lines()
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Detect TOML sections: [section] or [[array]]
+    let has_toml_sections = lines.iter().any(|l| {
+        let t = l.trim();
+        t.starts_with('[') && t.ends_with(']') && !t.contains('=')
+    });
+
+    if has_toml_sections {
+        return scan_toml_sections(&lines);
+    }
+
+    // YAML: top-level keys (no leading whitespace)
+    let keys: Vec<&str> = lines
+        .iter()
         .filter(|l| YAML_TOP_KEY.is_match(l))
         .take(40)
+        .copied()
         .collect();
     format!(
-        "[YAML/TOML keys ({} top-level)]\n{}",
+        "[YAML keys ({} top-level)]\n{}",
         keys.len(),
         keys.join("\n")
     )
+}
+
+fn scan_toml_sections(lines: &[&str]) -> String {
+    let mut sections: Vec<(String, usize)> = Vec::new();
+    let mut current_section = String::from("[top-level]");
+    let mut current_keys = 0usize;
+    let total_lines = lines.len();
+
+    for line in lines {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if t.starts_with('[') && t.ends_with(']') && !t.contains('=') {
+            if current_keys > 0 || current_section != "[top-level]" {
+                sections.push((current_section.clone(), current_keys));
+            }
+            current_section = t.to_string();
+            current_keys = 0;
+        } else if YAML_TOP_KEY.is_match(t) {
+            current_keys += 1;
+        }
+    }
+    if current_keys > 0 || current_section != "[top-level]" {
+        sections.push((current_section, current_keys));
+    }
+
+    let mut result = format!(
+        "[TOML: {} sections, {} lines]\n",
+        sections.len(),
+        total_lines
+    );
+    for (section, keys) in &sections {
+        result.push_str(&format!("  {} ({} keys)\n", section, keys));
+    }
+    result.trim_end().to_string()
 }
 
 pub fn compress_markdown(content: &str) -> String {
@@ -297,6 +347,19 @@ mod tests {
         let result = scan_yaml_keys(yaml);
         assert!(result.contains("4 top-level"), "got: {result}");
         assert!(result.contains("name:"));
+    }
+
+    #[test]
+    fn test_scan_toml_sections() {
+        let toml = "[package]\nname = \"rtk\"\nversion = \"1.0\"\n\n[dependencies]\nclap = \"4\"\nanyhow = \"1\"\nregex = \"1\"\n\n[dev-dependencies]\ntempfile = \"3\"\n";
+        let result = scan_yaml_keys(toml);
+        assert!(result.contains("TOML:"), "should detect TOML: {result}");
+        assert!(result.contains("[package]"), "got: {result}");
+        assert!(result.contains("[dependencies]"), "got: {result}");
+        assert!(
+            result.contains("3 keys"),
+            "deps should have 3 keys: {result}"
+        );
     }
 
     #[test]
